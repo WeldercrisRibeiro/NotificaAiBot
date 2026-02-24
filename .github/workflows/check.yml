@@ -159,8 +159,8 @@ jobs:
       - name: Commit state if changed
         run: |
           if git status --porcelain | grep -q ".state.json"; then
-            git config user.name "github-actions"
-            git config user.email "github-actions@github.com"
+            git config user.name "Weldercris Ribeiro"
+            git config user.email "weldercris.ribeiro.dev@gmail.com"
             git add .state.json
             git commit -m "Update state"
             git push
