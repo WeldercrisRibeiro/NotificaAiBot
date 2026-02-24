@@ -2,12 +2,13 @@ name: Check Infarma CAB versions
 
 on:
   schedule:
-    - cron: "0 12 * * 1" # toda segunda 12:00 UTC (09:00 Fortaleza ~ UTC-3)
-  workflow_dispatch: {}   # botão "Run workflow" (consultar na hora)
+    - cron: "0 12 * * 1" # toda segunda 12:00 UTC (~09:00 Fortaleza)
+  workflow_dispatch: {}  # botão "Run workflow" (consultar na hora)
 
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout (needed for cache file)
         uses: actions/checkout@v4
@@ -21,7 +22,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          BASE_URL: https://s3.amazonaws.com/infarma-cv/2504a
+          BASE_URL: https://s3.amazonaws.com/infarma-cv/2504ba
         run: |
           node <<'NODE'
           const fs = require("fs");
@@ -42,16 +43,17 @@ jobs:
 
           const STATE_FILE = ".state.json";
 
+          // HEAD que NÃO derruba o job: sempre resolve com status
           function head(url) {
-            return new Promise((resolve, reject) => {
+            return new Promise((resolve) => {
               const req = https.request(url, { method: "HEAD" }, (res) => {
                 const etag = (res.headers.etag || "").toString();
                 const lm = (res.headers["last-modified"] || "").toString();
                 const len = Number(res.headers["content-length"] || 0);
-                if (res.statusCode >= 200 && res.statusCode < 400) resolve({ etag, lm, len });
-                else reject(new Error(`HEAD failed ${res.statusCode}`));
+                resolve({ status: res.statusCode || 0, etag, lm, len });
               });
-              req.on("error", reject);
+
+              req.on("error", () => resolve({ status: 0, etag: "", lm: "", len: 0 }));
               req.end();
             });
           }
@@ -61,11 +63,20 @@ jobs:
             return new Promise((resolve, reject) => {
               const req = https.request(
                 `https://api.telegram.org/bot${TOKEN}/sendMessage`,
-                { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } },
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(payload),
+                  },
+                },
                 (res) => {
                   let data = "";
                   res.on("data", (c) => (data += c));
-                  res.on("end", () => (res.statusCode >= 200 && res.statusCode < 300) ? resolve(data) : reject(new Error(data)));
+                  res.on("end", () => {
+                    if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
+                    else reject(new Error(data));
+                  });
                 }
               );
               req.on("error", reject);
@@ -75,19 +86,38 @@ jobs:
           }
 
           async function main() {
-            if (!TOKEN || !CHAT_ID) throw new Error("Missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID secrets.");
+            if (!TOKEN || !CHAT_ID) {
+              throw new Error("Missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID secrets.");
+            }
 
-            const state = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) : {};
+            const state = fs.existsSync(STATE_FILE)
+              ? JSON.parse(fs.readFileSync(STATE_FILE, "utf8"))
+              : {};
 
             const changes = [];
+
             for (const [key, name] of Object.entries(PRODUCTS)) {
               const url = `${BASE_URL}/${key}.CAB`;
               const info = await head(url);
+
+              // Se não existe, só pula (não falha)
+              if (info.status === 404) {
+                console.log(`404 (não existe): ${url}`);
+                continue;
+              }
+
+              // Se der outro status (0, 500, etc), pula e loga
+              if (info.status < 200 || info.status >= 400) {
+                console.log(`Falhou status=${info.status}: ${url}`);
+                continue;
+              }
+
               const sig = `etag=${info.etag}|lm=${info.lm}|len=${info.len}`;
               const prev = state[key];
 
+              // Primeira vez: só salva (não avisa)
               if (!prev) {
-                state[key] = sig; // inicializa sem avisar
+                state[key] = sig;
                 continue;
               }
 
@@ -115,6 +145,7 @@ jobs:
                 `- ETag: ${c.info.etag}\n` +
                 `- Last-Modified: ${c.info.lm}\n` +
                 `- Size: ${c.info.len} bytes`;
+
               await sendTelegram(msg);
             }
           }
